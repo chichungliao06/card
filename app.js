@@ -24,7 +24,15 @@
   function md(d) { return d ? (d.getMonth() + 1) + '/' + d.getDate() : ''; }
   function todayD() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
   function short(s, n) { s = String(s || ''); n = n || 34; return s.length > n ? s.slice(0, n) + '…' : s; }
-  function toast(msg) { var t = $('#toast'); t.textContent = msg; t.classList.add('show'); setTimeout(function () { t.classList.remove('show'); }, 1800); }
+  var toastTimer = null;
+  function toast(msg, undoFn) {
+    var t = $('#toast');
+    t.innerHTML = esc(msg) + (undoFn ? '<button class="undo">復原</button>' : '');
+    t.classList.add('show');
+    if (undoFn) t.querySelector('.undo').onclick = function () { t.classList.remove('show'); undoFn(); };
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, undoFn ? 5000 : 1800);
+  }
   function cardLabel(h) { return h.name; }
   function holdingById(id) { return S.db.holdings.filter(function (h) { return h.id === id; })[0]; }
   function ruleById(id) { return S.db.rules.filter(function (r) { return r.id === id; })[0]; }
@@ -217,7 +225,20 @@
     write({ action: 'setReg', holdingId: hid, ruleId: rid, key: key }, function (raw) {
       raw['登錄狀態'].push({ '持卡ID': hid, '規則ID': rid, '週期': key, '登錄日期': E.ymd(new Date()) });
     });
-    toast(skip ? '這項之後不再提醒' : '已記錄登錄（' + (key === 'once' ? '整個活動期間' : key) + '）');
+    toast(skip ? '這項之後不再提醒' : '已記錄登錄（' + regLabel(key) + '）', function () { unmarkReg(hid, rid, key); });
+  }
+  function unmarkReg(hid, rid, key) {
+    write({ action: 'unsetReg', holdingId: hid, ruleId: rid, key: key }, function (raw) {
+      raw['登錄狀態'] = raw['登錄狀態'].filter(function (r) { return !(r['持卡ID'] === hid && r['規則ID'] === rid && String(r['週期']) === String(key)); });
+    });
+    toast('已復原，重新列回待辦');
+  }
+  function regLabel(key) {
+    if (key === 'skip') return '不提醒';
+    if (key === 'once') return '整個活動期間';
+    var m = String(key).match(/^(\d{4})-(\d{2})$/); if (m) return (+m[2]) + ' 月';
+    m = String(key).match(/^(\d{4})-Q(\d)$/); if (m) return '第 ' + m[2] + ' 季';
+    return key;
   }
 
   // ---------- 記一筆 ----------
@@ -338,8 +359,23 @@
     if (t.unconfirmed.length) html += '<h2>資料待確認（' + t.unconfirmed.length + '）</h2><div class="card list">' + t.unconfirmed.map(function (r) {
       var c = S.db.cards[r.cardId]; return '<div class="item"><div class="l"><b>' + esc(c ? c.bank + ' ' + c.name : '') + '</b><div class="meta">' + esc(short(r.scope, 40)) + '｜' + esc(r.source) + '</div></div></div>';
     }).join('') + '</div>';
+    // 已處理（本期已登錄、不提醒）→ 可復原
+    var today = todayD(), done = [];
+    S.db.regs.forEach(function (g) {
+      var r = ruleById(g.ruleId), h = holdingById(g.holdingId);
+      if (!r || !h) return;
+      if (g.key !== 'skip' && g.key !== E.regKey(r, today)) return;   // 過去週期的不列
+      done.push({ g: g, r: r, h: h });
+    });
+    if (done.length) html += '<details class="card"><summary>已處理（' + done.length + '）：按錯可在這裡復原</summary><div class="list">' + done.map(function (d) {
+      return '<div class="item"><div class="l"><b>' + esc(d.h.holder) + '｜' + esc(d.h.name) + '</b><div class="meta">' + esc(short(d.r.scope, 40)) + '</div>' +
+        '<div class="meta">' + (d.g.key === 'skip' ? '不提醒' : '已登錄（' + regLabel(d.g.key) + '）') + (d.g.date ? '｜' + md(d.g.date) + ' 標記' : '') + '</div></div>' +
+        '<div class="r"><button class="btn small ghost" data-undo="' + d.h.id + '|' + d.r.id + '|' + esc(d.g.key) + '">復原</button></div></div>';
+    }).join('') + '</div></details>';
     app.innerHTML = html;
     app.onclick = function (ev) {
+      var u = ev.target.closest('[data-undo]');
+      if (u) { var q = u.dataset.undo.split('|'); unmarkReg(q[0], q[1], q[2]); return; }
       var b = ev.target.closest('[data-reg],[data-skip]'); if (!b) return;
       var p = (b.dataset.reg || b.dataset.skip).split('|');
       markReg(p[0], p[1], !!b.dataset.skip);
